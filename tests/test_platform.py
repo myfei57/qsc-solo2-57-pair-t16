@@ -7,6 +7,35 @@ import pytest
 from heatnet.app import build_platform
 from heatnet.config import default_config
 from heatnet.station.service import CancelToken
+from heatnet.station.station import HeatStation
+
+
+class FailingPressureStation(HeatStation):
+    """首次向失败目标下发时模拟执行器中途失败。"""
+
+    def __init__(self, station: HeatStation, fail_below: float) -> None:
+        super().__init__(
+            station.name,
+            station.zone(),
+            station.limits,
+            pressure_kpa=station.pressure_kpa(),
+        )
+        self._fail_below = fail_below
+        self._failed_target: float | None = None
+
+    def drive_pressure_kpa(
+        self,
+        target_kpa: float,
+        max_step_kpa: float = 12.0,
+        dt: float = 1.0,
+    ) -> float:
+        before = self.pressure_kpa()
+        result = super().drive_pressure_kpa(target_kpa, max_step_kpa, dt)
+        if self._failed_target is None and target_kpa < before:
+            self._failed_target = float(target_kpa)
+        if target_kpa == self._failed_target and result <= self._fail_below:
+            raise RuntimeError("actuator offline")
+        return result
 
 
 def test_startup_dispatch_and_cycle(online):
@@ -62,6 +91,44 @@ def test_replay_valves_skips_applied_commands(platform):
     second = platform.replay_valves(["st01"])
     assert second["replayed"] == 0
     assert platform.valves["st01"].position_pct() == pytest.approx(65.0)
+
+
+def test_retrofit_reports_impact_and_audit(platform):
+    report = platform.retrofit_baseline(350.0)
+    assert report["ok"] is True
+    assert report["impacted_count"] == len(platform.stations)
+    assert {item["station"] for item in report["impacts"]} == set(platform.stations)
+
+    pressure = platform.pressure_report()
+    assert pressure["last_retrofit"]["impacted_count"] == len(platform.stations)
+    audit = platform.audit.tail(1)[-1]
+    assert audit["component"] == "pressure"
+    assert audit["payload"]["impacted_count"] == len(platform.stations)
+    assert len(audit["payload"]["impacts"]) == len(platform.stations)
+
+
+def test_retrofit_partial_failure_rolls_back_baseline_loop_and_stations(platform):
+    original_baseline = platform.pressure.baseline.value_kpa()
+    faulty = FailingPressureStation(platform.stations["st02"], 310.0)
+    platform.stations["st02"] = faulty
+    platform.pressure.bind_stations(platform.stations)
+
+    report = platform.retrofit_baseline(300.0)
+
+    assert report["ok"] is False
+    assert report["partial_failure"] is True
+    assert report["rolled_back"] is True
+    assert report["rollback_scope"] == "baseline_loop_stations"
+    assert report["rollback_baseline_kpa"] == pytest.approx(310.0)
+    assert platform.pressure.baseline.value_kpa() == pytest.approx(310.0)
+    assert platform.secondary.pressure_kpa() == pytest.approx(310.0, abs=2.0)
+    for station in platform.stations.values():
+        assert station.pressure_kpa() == pytest.approx(310.0, abs=2.0)
+    audit = platform.audit.tail(1)[-1]
+    assert audit["severity"] == "warning"
+    assert audit["payload"]["rollback_scope"] == "baseline_loop_stations"
+    assert audit["payload"]["rollback_baseline_kpa"] == pytest.approx(310.0)
+    assert original_baseline == pytest.approx(320.0)
 
 
 def test_collect_heat_and_settle_quota(platform):

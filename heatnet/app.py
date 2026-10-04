@@ -23,6 +23,7 @@ from .ns.topology import Topology, build_default_topology
 from .ns.zone import Zone, ZoneRegistry
 from .pressure.baseline import PressureBaseline
 from .pressure.control import PressurisingController
+from .pressure.retrofit import pressure_consistent
 from .primary.flow import batch_flows
 from .primary.network import PrimaryNetwork
 from .pump.curve import PumpCurve
@@ -110,8 +111,11 @@ class Platform:
         self.ledger = QuotaLedger(self.config.quota, self.meters)
         self._build_meters()
         self.pressure = PressurisingController(
-            PressureBaseline(self.config.pressure), self.config.pressure
+            PressureBaseline(self.config.pressure, initial_kpa=self.secondary.pressure_kpa()),
+            self.config.pressure,
+            self.config.secondary,
         )
+        self.pressure.bind_stations(self.stations)
 
         self._cycles = 0
         self._operations = 0
@@ -137,7 +141,12 @@ class Platform:
         queues: dict[str, ValveCommandQueue] = {}
         for zone in self.zones.names():
             for name in self.zones.stations(zone):
-                station = HeatStation(name, zone, self.config.station)
+                station = HeatStation(
+                    name,
+                    zone,
+                    self.config.station,
+                    pressure_kpa=self.secondary.pressure_kpa(),
+                )
                 stations[name] = station
                 valves[name] = Valve(f"{name}.mix", self.config.valve)
                 queues[name] = ValveCommandQueue(name)
@@ -425,18 +434,33 @@ class Platform:
         """下发一次定压基线改造。"""
 
         with self._lock:
+            op_id = self.ids.next()
             report = self.pressure.retrofit(self.secondary, target_kpa)
+            self.pressure.annotate_last_report(op_id=op_id)
+            severity = (
+                "notice"
+                if report["ok"]
+                else ("alarm" if report.get("precheck_rejected") else "warning")
+            )
             self.bus.publish(
                 Event.of(
                     "pressure",
                     "pressure",
                     "apply_retrofit",
-                    severity="notice" if report["ok"] else "warning",
-                    message="定压基线改造" if report["ok"] else "定压基线改造被拒绝",
+                    asset="secondary.loop",
+                    op_id=op_id,
+                    severity=severity,
+                    message=(
+                        "定压基线改造完成"
+                        if report["ok"]
+                        else "定压基线改造预校验被拒绝"
+                        if report.get("precheck_rejected")
+                        else "定压基线改造部分失败并整体退回"
+                    ),
                     **report,
                 )
             )
-            return report
+            return {"op_id": op_id, **report}
 
     def secondary_cycle(self, dt: float = 1.0) -> dict:
         """跑一个二次网循环（结束前泵一定停稳）。"""
@@ -741,11 +765,46 @@ class Platform:
 
         payload = self.pressure.baseline.snapshot().as_dict()
         payload["pressure_kpa"] = round(self.secondary.pressure_kpa(), 2)
+        payload["consistent"] = pressure_consistent(
+            self.pressure.baseline.value_kpa(), self.secondary.pressure_kpa()
+        )
         payload["settles"] = self.pressure.settles()
         payload["limit"] = [
             self.config.pressure.baseline_min_kpa,
             self.config.pressure.baseline_max_kpa,
         ]
+        payload["secondary_limit"] = [
+            self.config.secondary.makeup_min_kpa,
+            self.config.secondary.makeup_max_kpa,
+        ]
+        payload["partial_failures"] = self.pressure.partial_failures()
+        payload["rollbacks"] = self.pressure.rollbacks()
+        last_report = self.pressure.last_report()
+        if last_report is not None:
+            payload["last_retrofit"] = {
+                key: last_report[key]
+                for key in (
+                    "ok",
+                    "op_id",
+                    "baseline_kpa",
+                    "pressure_kpa",
+                    "consistent",
+                    "retrofit_type",
+                    "affected_stations",
+                    "impacted_count",
+                    "impacts",
+                    "rolled_back",
+                    "rollback_mode",
+                    "rollback_scope",
+                    "rollback_baseline_kpa",
+                    "rollback_pressure_kpa",
+                    "rollback_stations",
+                    "precheck_rejected",
+                    "partial_failure",
+                    "violations",
+                )
+                if key in last_report
+            }
         return payload
 
     def quota_report(self) -> dict:

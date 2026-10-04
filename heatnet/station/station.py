@@ -13,12 +13,20 @@ from .state import StationSnapshot
 class HeatStation:
     """一个换热站。"""
 
-    def __init__(self, name: str, zone: str, limits: StationLimits, supply_c: float | None = None) -> None:
+    def __init__(
+        self,
+        name: str,
+        zone: str,
+        limits: StationLimits,
+        supply_c: float | None = None,
+        pressure_kpa: float | None = None,
+    ) -> None:
         self._name = name
         self._zone = zone
         self._limits = limits
         self._supply_c = float(limits.setpoint_c if supply_c is None else supply_c)
         self._target_c = float(limits.setpoint_c)
+        self._pressure_kpa = float(pressure_kpa) if pressure_kpa is not None else 0.0
         self._steps = 0
 
     @property
@@ -49,6 +57,30 @@ class HeatStation:
         """返回二次侧目标温度。"""
 
         return self._target_c
+
+    def pressure_kpa(self) -> float:
+        """返回站侧二次网定压。"""
+
+        return self._pressure_kpa
+
+    def drive_pressure_kpa(
+        self,
+        target_kpa: float,
+        max_step_kpa: float = 12.0,
+        dt: float = 1.0,
+    ) -> float:
+        """把站侧压力向二次网定压目标推进一个步长。"""
+
+        if dt <= 0:
+            raise ValueError("步长必须为正")
+        target = float(target_kpa)
+        step = abs(max_step_kpa) * dt
+        gap = target - self._pressure_kpa
+        if abs(gap) <= step:
+            self._pressure_kpa = target
+        else:
+            self._pressure_kpa += step if gap > 0.0 else -step
+        return self._pressure_kpa
 
     def steps(self) -> int:
         """返回累计调节步数。"""
@@ -94,6 +126,7 @@ class HeatStation:
             zone=self._zone,
             supply_c=self._supply_c,
             target_c=self._target_c,
+            pressure_kpa=self._pressure_kpa,
             demand_pct=self.demand_pct(),
             steps=self._steps,
             at_setpoint=self.at_setpoint(),

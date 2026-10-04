@@ -83,6 +83,18 @@ def test_api_forecast_curve_and_reports(platform):
     assert quota["accumulator"]["count"] == 6
 
 
+def test_api_pressure_reports_retrofit_impact(platform):
+    api = Api(platform)
+    status, retrofit = api.handle("POST", "/api/retrofit", {}, {"baseline_kpa": 350.0})
+    assert status == 200
+    assert retrofit["ok"] is True
+    assert retrofit["impacted_count"] == 6
+    status, pressure = api.handle("GET", "/api/pressure", {}, {})
+    assert status == 200
+    assert pressure["last_retrofit"]["impacted_count"] == 6
+    assert len(pressure["last_retrofit"]["impacts"]) == 6
+
+
 def test_api_timeline_journal_and_store(platform):
     api = Api(platform)
     platform.start()

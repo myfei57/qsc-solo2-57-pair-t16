@@ -1,10 +1,13 @@
-"""定压基线的校验与回滚。
+"""定压基线的状态边界。
 
-改造下发要先算目标、再校验、最后才写基线。校验不过时必须保持原值：先写后校验
-的话，越界目标已经进了基线，函数再返回错误也回不到旧值，二次网会卡在超压。
+改造目标、二次网压力带和受影响站的联合预校验由 :mod:`~heatnet.pressure.retrofit`
+统一完成；本类只保存已提交基线，并保留最后一道写入边界，防止绕过改造编排直接把
+越界值写入基线。
 """
 
 from __future__ import annotations
+
+import math
 
 from ..config import PressureLimits
 from ..errors import InterlockError
@@ -14,9 +17,17 @@ from .state import PressureSnapshot
 class PressureBaseline:
     """二次网定压基线。"""
 
-    def __init__(self, limits: PressureLimits) -> None:
+    def __init__(self, limits: PressureLimits, initial_kpa: float | None = None) -> None:
         self._limits = limits
-        self._baseline_kpa = (limits.baseline_min_kpa + limits.baseline_max_kpa) / 2.0
+        midpoint = (limits.baseline_min_kpa + limits.baseline_max_kpa) / 2.0
+        initial = midpoint if initial_kpa is None else float(initial_kpa)
+        if not math.isfinite(initial) or not limits.in_range(initial):
+            raise InterlockError(
+                f"初始定压基线 {initial:.1f} kPa 越界 "
+                f"[{limits.baseline_min_kpa:.1f}, {limits.baseline_max_kpa:.1f}]",
+                component="pressure",
+            )
+        self._baseline_kpa = initial
         self._revisions = 0
         self._rejected = 0
         self._last_target_kpa = self._baseline_kpa
@@ -50,6 +61,15 @@ class PressureBaseline:
 
         return self._limits.in_range(target_kpa)
 
+    def reject_retrofit(self, target_kpa: float) -> None:
+        """记录一个未通过预校验、尚未写入的目标。"""
+
+        try:
+            self._last_target_kpa = float(target_kpa)
+        except (TypeError, ValueError):
+            self._last_target_kpa = float("nan")
+        self._rejected += 1
+
     def apply_retrofit(self, target_kpa: float) -> float:
         """按改造下发更新基线：先校验，通过才写值。"""
 
@@ -64,6 +84,26 @@ class PressureBaseline:
             )
         self._baseline_kpa = target
         self._revisions += 1
+        return self._baseline_kpa
+
+    def cancel_last_revision(self) -> None:
+        """撤销执行期失败并整体退回的那次成功提交计数。"""
+
+        if self._revisions > 0:
+            self._revisions -= 1
+
+    def restore_baseline(self, target_kpa: float) -> float:
+        """执行整体退回时恢复基线，不计入成功改造次数。"""
+
+        target = float(target_kpa)
+        if not self.in_range(target):
+            raise InterlockError(
+                f"回退基线 {target:.1f} kPa 越界 "
+                f"[{self._limits.baseline_min_kpa:.1f}, {self._limits.baseline_max_kpa:.1f}]",
+                component="pressure",
+            )
+        self._baseline_kpa = target
+        self._last_target_kpa = target
         return self._baseline_kpa
 
     def snapshot(self) -> PressureSnapshot:

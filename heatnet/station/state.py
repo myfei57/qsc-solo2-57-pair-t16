@@ -13,6 +13,7 @@ class StationSnapshot:
     zone: str
     supply_c: float
     target_c: float
+    pressure_kpa: float
     demand_pct: float
     steps: int
     at_setpoint: bool
@@ -23,6 +24,7 @@ class StationSnapshot:
             "zone": self.zone,
             "supply_c": round(self.supply_c, 2),
             "target_c": round(self.target_c, 2),
+            "pressure_kpa": round(self.pressure_kpa, 2),
             "demand_pct": round(self.demand_pct, 2),
             "steps": self.steps,
             "at_setpoint": self.at_setpoint,
