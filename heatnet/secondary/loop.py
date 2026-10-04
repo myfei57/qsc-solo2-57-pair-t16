@@ -19,11 +19,11 @@ MAKEUP_STEP_KPA = 12.0
 class SecondaryLoop:
     """二次网回路：回水、供水与定压。"""
 
-    def __init__(self, limits: SecondaryLimits) -> None:
+    def __init__(self, limits: SecondaryLimits, pressure_kpa: float | None = None) -> None:
         self._limits = limits
         self._return_c = limits.return_target_c - 4.0
         self._supply_c = self._return_c + SUPPLY_DELTA_C
-        self._pressure_kpa = limits.makeup_target_kpa
+        self._pressure_kpa = limits.makeup_target_kpa if pressure_kpa is None else float(pressure_kpa)
         self._steps = 0
         self._disturbances = 0
 

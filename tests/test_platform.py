@@ -76,6 +76,43 @@ def test_collect_heat_and_settle_quota(platform):
     assert platform.ledger.periods() == 1
 
 
+def test_retrofit_reports_impact_and_writes_audit(platform):
+    original = platform.pressure.baseline.value_kpa()
+    target = original + 20.0
+    report = platform.retrofit_baseline(target)
+
+    assert report["ok"] is True
+    assert report["affected_stations"] == sorted(platform.stations)
+    assert {item["actual_kpa"] for item in report["impact"]} == {round(target, 2)}
+    assert platform.secondary.pressure_kpa() == pytest.approx(target)
+    for station in platform.stations.values():
+        assert station.pressure_kpa() == pytest.approx(target)
+
+    entry = platform.audit.entries(1)[0]
+    assert entry["component"] == "pressure"
+    assert entry["payload"]["rollback_scope"] == "none"
+    assert len(entry["payload"]["impact"]) == len(platform.stations)
+
+    pressure = platform.pressure_report()
+    assert pressure["consistent"] is True
+    assert pressure["stations_consistent"] is True
+    assert pressure["last_retrofit"]["affected_stations"] == sorted(platform.stations)
+
+
+def test_retrofit_preflight_rejection_leaves_all_pressure_values(platform):
+    original = platform.pressure.baseline.value_kpa()
+    report = platform.retrofit_baseline(9999.0)
+
+    assert report["ok"] is False
+    assert report["status"] == "rejected"
+    assert len(report["impact"]) == len(platform.stations)
+    assert platform.pressure.baseline.value_kpa() == pytest.approx(original)
+    assert platform.secondary.pressure_kpa() == pytest.approx(original)
+    for station in platform.stations.values():
+        assert station.pressure_kpa() == pytest.approx(original)
+    assert platform.audit.entries(1)[0]["severity"] == "alarm"
+
+
 def test_concurrency_probe_reports_no_lost_state(platform):
     report = platform.concurrency_probe(rounds=24)
     assert report["ok"] is True

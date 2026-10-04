@@ -14,6 +14,7 @@ class StationSnapshot:
     supply_c: float
     target_c: float
     demand_pct: float
+    pressure_kpa: float | None
     steps: int
     at_setpoint: bool
 
@@ -24,6 +25,7 @@ class StationSnapshot:
             "supply_c": round(self.supply_c, 2),
             "target_c": round(self.target_c, 2),
             "demand_pct": round(self.demand_pct, 2),
+            "pressure_kpa": None if self.pressure_kpa is None else round(self.pressure_kpa, 2),
             "steps": self.steps,
             "at_setpoint": self.at_setpoint,
         }

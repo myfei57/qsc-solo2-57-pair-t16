@@ -23,6 +23,7 @@ from .ns.topology import Topology, build_default_topology
 from .ns.zone import Zone, ZoneRegistry
 from .pressure.baseline import PressureBaseline
 from .pressure.control import PressurisingController
+from .pressure.retrofit import consistent as pressure_consistent
 from .primary.flow import batch_flows
 from .primary.network import PrimaryNetwork
 from .pump.curve import PumpCurve
@@ -98,7 +99,10 @@ class Platform:
         self.curve = HeatCurve(self.config.curve)
         self.source = HeatSource(self.config.source)
         self.network = PrimaryNetwork(self.config.primary)
-        self.secondary = SecondaryLoop(self.config.secondary)
+        self.pressure_baseline = PressureBaseline(self.config.pressure)
+        self.secondary = SecondaryLoop(
+            self.config.secondary, pressure_kpa=self.pressure_baseline.value_kpa()
+        )
         self._build_zones()
         self.mapping = StationMapping(self.zones)
 
@@ -110,7 +114,7 @@ class Platform:
         self.ledger = QuotaLedger(self.config.quota, self.meters)
         self._build_meters()
         self.pressure = PressurisingController(
-            PressureBaseline(self.config.pressure), self.config.pressure
+            self.pressure_baseline, self.config.pressure
         )
 
         self._cycles = 0
@@ -137,7 +141,12 @@ class Platform:
         queues: dict[str, ValveCommandQueue] = {}
         for zone in self.zones.names():
             for name in self.zones.stations(zone):
-                station = HeatStation(name, zone, self.config.station)
+                station = HeatStation(
+                    name,
+                    zone,
+                    self.config.station,
+                    pressure_kpa=self.pressure_baseline.value_kpa(),
+                )
                 stations[name] = station
                 valves[name] = Valve(f"{name}.mix", self.config.valve)
                 queues[name] = ValveCommandQueue(name)
@@ -425,14 +434,24 @@ class Platform:
         """下发一次定压基线改造。"""
 
         with self._lock:
-            report = self.pressure.retrofit(self.secondary, target_kpa)
+            report = self.pressure.retrofit(
+                self.secondary,
+                target_kpa,
+                stations=[self.stations[name] for name in sorted(self.stations)],
+            )
             self.bus.publish(
                 Event.of(
                     "pressure",
                     "pressure",
                     "apply_retrofit",
-                    severity="notice" if report["ok"] else "warning",
-                    message="定压基线改造" if report["ok"] else "定压基线改造被拒绝",
+                    severity="notice" if report["ok"] else "alarm",
+                    message=(
+                        "定压基线改造完成"
+                        if report["ok"]
+                        else "定压基线改造预校验拒绝"
+                        if report["status"] == "rejected"
+                        else "定压基线改造部分失败并整体回退"
+                    ),
                     **report,
                 )
             )
@@ -741,6 +760,19 @@ class Platform:
 
         payload = self.pressure.baseline.snapshot().as_dict()
         payload["pressure_kpa"] = round(self.secondary.pressure_kpa(), 2)
+        payload["consistent"] = pressure_consistent(
+            payload["pressure_kpa"], payload["baseline_kpa"]
+        )
+        payload["station_pressure_kpa"] = {
+            name: (None if station.pressure_kpa() is None else round(station.pressure_kpa(), 2))
+            for name, station in self.stations.items()
+        }
+        payload["stations_consistent"] = all(
+            station.pressure_kpa() is not None
+            and pressure_consistent(float(station.pressure_kpa()), payload["baseline_kpa"])
+            for station in self.stations.values()
+        )
+        payload["last_retrofit"] = self.pressure.last_report()
         payload["settles"] = self.pressure.settles()
         payload["limit"] = [
             self.config.pressure.baseline_min_kpa,

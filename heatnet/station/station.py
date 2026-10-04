@@ -13,12 +13,20 @@ from .state import StationSnapshot
 class HeatStation:
     """一个换热站。"""
 
-    def __init__(self, name: str, zone: str, limits: StationLimits, supply_c: float | None = None) -> None:
+    def __init__(
+        self,
+        name: str,
+        zone: str,
+        limits: StationLimits,
+        supply_c: float | None = None,
+        pressure_kpa: float | None = None,
+    ) -> None:
         self._name = name
         self._zone = zone
         self._limits = limits
         self._supply_c = float(limits.setpoint_c if supply_c is None else supply_c)
         self._target_c = float(limits.setpoint_c)
+        self._pressure_kpa = None if pressure_kpa is None else float(pressure_kpa)
         self._steps = 0
 
     @property
@@ -54,6 +62,17 @@ class HeatStation:
         """返回累计调节步数。"""
 
         return self._steps
+
+    def pressure_kpa(self) -> float | None:
+        """返回站侧已同步的二次网定压。"""
+
+        return self._pressure_kpa
+
+    def set_pressure_kpa(self, pressure_kpa: float) -> float:
+        """同步二次网定压到本站。"""
+
+        self._pressure_kpa = float(pressure_kpa)
+        return self._pressure_kpa
 
     def at_setpoint(self) -> bool:
         """供水温度是否落在设定点带内。"""
@@ -95,6 +114,7 @@ class HeatStation:
             supply_c=self._supply_c,
             target_c=self._target_c,
             demand_pct=self.demand_pct(),
+            pressure_kpa=self._pressure_kpa,
             steps=self._steps,
             at_setpoint=self.at_setpoint(),
         )
